@@ -6,15 +6,21 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 
 	MQTT "github.com/eclipse/paho.mqtt.golang"
+	"github.com/gorilla/websocket"
 )
+
+var broadcast = make(chan int)
+var clients = make(map[*websocket.Conn]bool)
 
 func main() {
 	uri := os.Getenv("PS_BROKER_URI")
 	user := os.Getenv("PS_MQTT_USERNAME")
 	pass := os.Getenv("PS_MQTT_PASSWORD")
+	host_uri := os.Getenv("PS_PUBLISH_URI")
 
 	MQTT.DEBUG = log.New(os.Stdout, "", 0)
 	MQTT.ERROR = log.New(os.Stdout, "", 0)
@@ -38,12 +44,52 @@ func main() {
 
 	client.Subscribe("#", 0, nil)
 
-	select {}
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		serveWs(w, r)
+	})
+	err := http.ListenAndServe(host_uri, nil)
+	if err != nil {
+		log.Fatal("ListenAndServeError: ", err)
+	}
+
+	go wsMain()
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true	
+	},
+}
+
+func serveWs(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+
+	if err == nil {
+		clients[ws] = true
+	}
+}
+
+func msgAllClients(data string) {
+	for client := range clients {
+		err := client.WriteMessage(websocket.TextMessage, []byte(data))
+		if err != nil {
+			fmt.Printf("Websocket error: %s", err)
+			client.Close()
+			delete(clients, client)
+		}
+	}
+}
+
+func wsMain() {
+	for {
+		val := <- broadcast
+		txt := fmt.Sprintf("noe data: %v", val)
+		msgAllClients(txt)
+	}
 }
 
 var f MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Message) {
-	fmt.Printf("TOPIC: %s - ", msg.Topic())
-	fmt.Printf("MSG: %s\n", msg.Payload())
+	msgAllClients(fmt.Sprintf("%s", msg.Payload()))
 }
 
 func NewTLSConfig() *tls.Config {
